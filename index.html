@@ -184,7 +184,7 @@ function render(){
   $('coins').textContent = fmt(S.coins);
   $('gems').textContent = fmt(S.gems);
   $('pop').textContent = fmt(population());
-  $('rate').textContent = fmt(rateHr());
+  $('rate').textContent = fmt(rateHr() / 60);
   $('bonus').textContent = '+' + (S.bonus*100).toFixed(1) + '%';
   $('ratio').textContent = `1 HP = ${hpRatio()} gem${hpRatio()>1?'s':''}`;
   $('gemval').textContent = `1 gem = ${fmt(gemValue())} coins`;
