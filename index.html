@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HP Town</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#1b1d26;color:#e8e8ee;margin:0;padding:16px;max-width:720px;margin:auto}
+  h1{margin:0 0 8px}
+  h2{margin:20px 0 8px;font-size:1.1em;border-bottom:1px solid #333;padding-bottom:4px}
+  .stats{display:flex;flex-wrap:wrap;gap:8px}
+  .stat{background:#262a38;padding:8px 12px;border-radius:8px;flex:1;min-width:130px}
+  .stat b{display:block;font-size:1.2em}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#262a38;padding:8px 12px;border-radius:8px;margin-bottom:6px}
+  .row small{color:#9aa}
+  button{background:#4a6cf7;color:#fff;border:0;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:.95em}
+  button:disabled{background:#444;color:#888;cursor:not-allowed}
+  button.warn{background:#c0504d}
+  input{padding:8px;border-radius:6px;border:1px solid #444;background:#12141b;color:#fff;width:110px}
+  .ctl{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  #msg{min-height:1.4em;color:#f5c542;margin-top:6px}
+</style>
+</head>
+<body>
+<h1>HP Town</h1>
+
+<div class="stats">
+  <div class="stat">Coins<b id="coins"></b></div>
+  <div class="stat">Gems<b id="gems"></b></div>
+  <div class="stat">Population<b id="pop"></b></div>
+  <div class="stat">Coins / hour<b id="rate"></b></div>
+  <div class="stat">Retire bonus<b id="bonus"></b></div>
+</div>
+<div id="msg"></div>
+
+<h2>Add HP</h2>
+<div class="ctl">
+  <input id="hp" type="number" min="0" placeholder="Total HP">
+  <button onclick="addHP()">Add</button>
+  <small id="ratio"></small>
+</div>
+
+<h2>Gems → Coins</h2>
+<div class="ctl">
+  <input id="conv" type="number" min="1" value="1">
+  <button onclick="convert(false)">Convert</button>
+  <button onclick="convert(true)">Convert all</button>
+  <small id="gemval"></small>
+</div>
+
+<h2>Buildings</h2>
+<div id="buildings"></div>
+
+<h2>Upgrades</h2>
+<div id="upgrades"></div>
+
+<h2>Retire town</h2>
+<div class="row">
+  <div>Costs 5 gems. Resets coins and buildings (keeps gems and upgrades).<br>
+    <small id="retinfo"></small></div>
+  <button class="warn" id="retbtn" onclick="retire()">Retire</button>
+</div>
+<div class="ctl" style="margin-top:12px"><button class="warn" onclick="wipe()">Reset everything</button></div>
+
+<script>
+const OFFLINE_CAP = 12 * 3600; // seconds
+const SAVE_KEY = 'hpTownSave';
+
+const BUILDINGS = [
+  {id:'yert',    name:'Yert',    cost:10,    pop:1},
+  {id:'hut',     name:'Hut',     cost:100,   pop:2},
+  {id:'house',   name:'House',   cost:1500,  pop:4},
+  {id:'duplex',  name:'Duplex',  cost:12000, pop:6},
+  {id:'motel',   name:'Motel',   cost:6e5,   pop:20},
+  {id:'hotel',   name:'Hotel',   cost:3e7,   pop:40},
+  {id:'terrace', name:'Terrace', cost:1e9,   pop:75},
+  {id:'street',  name:'Street',  cost:1e10,  pop:100},
+];
+const UPGRADES = [
+  {id:'cheap', name:'Cheap materials',     coins:8000, gems:2, desc:'Yerts increase in price by 8.5% per level instead of 10%.'},
+  {id:'fist',  name:'Gem fist',            coins:3e6,  gems:5, desc:'Each gem also gives 6 minutes of idle coins on top of the base 100.'},
+  {id:'brick', name:'Mass produce bricks', coins:7e8,  gems:3, desc:'Houses, Motels and Terraces are 20% cheaper.'},
+  {id:'dupe',  name:'Duplicate gems',      coins:5e9,  gems:4, desc:'Permanently doubles the HP-to-gem ratio.'},
+];
+
+const fresh = () => ({coins:0, gems:0, hpCounted:0, counts:{}, ups:{}, bonus:0, last:Date.now()});
+let S = load();
+
+function load(){
+  try { const s = JSON.parse(localStorage.getItem(SAVE_KEY)); if (s) return Object.assign(fresh(), s); } catch(e){}
+  return fresh();
+}
+function save(){ S.last = Date.now(); localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
+
+// ---------- calculations ----------
+const count = id => S.counts[id] || 0;
+const totalBuildings = () => BUILDINGS.reduce((a,b)=>a+count(b.id),0);
+const population = () => BUILDINGS.reduce((a,b)=>a+count(b.id)*b.pop,0);
+const rateHr = () => population() * (1 + S.bonus);
+const hpRatio = () => S.ups.dupe ? 2 : 1;
+const gemValue = () => 100 + (S.ups.fist ? rateHr() * 0.1 : 0);
+
+function buildingCost(b){
+  const growth = (b.id==='yert' && S.ups.cheap) ? 1.085 : 1.10;
+  let c = b.cost * Math.pow(growth, count(b.id));
+  if (S.ups.brick && ['house','motel','terrace'].includes(b.id)) c *= 0.8;
+  return Math.ceil(c);
+}
+const buildingGems = b => ((count(b.id)+1) % 5 === 0) ? 1 : 0;
+
+// ---------- formatting ----------
+function fmt(n){
+  if (n >= 1e6) return n.toExponential(2).replace('e+','×10^');
+  return Math.floor(n).toLocaleString();
+}
+function msg(t){ document.getElementById('msg').textContent = t; }
+
+// ---------- time / income ----------
+function tick(){
+  const now = Date.now();
+  let dt = (now - S.last) / 1000;
+  if (dt < 0) dt = 0;
+  const away = dt > 60;
+  const capped = Math.min(dt, OFFLINE_CAP);
+  const earned = rateHr() / 3600 * capped;
+  S.coins += earned;
+  S.last = now;
+  return {earned, away, capped};
+}
+
+// ---------- actions ----------
+function addHP(){
+  const v = parseFloat(document.getElementById('hp').value);
+  if (isNaN(v) || v < 0) return msg('Enter a valid HP number.');
+  if (v > S.hpCounted){
+    const g = Math.floor((v - S.hpCounted) * hpRatio());
+    S.gems += g; S.hpCounted = v;
+    msg(`+${fmt(g)} gems.`);
+  } else {
+    S.hpCounted = v;
+    msg('HP is not higher than last time, so no gems added.');
+  }
+  render(); save();
+}
+function convert(all){
+  let n = all ? S.gems : Math.floor(parseFloat(document.getElementById('conv').value));
+  if (!n || n < 1) return;
+  if (n > S.gems) return msg('Not enough gems.');
+  const val = gemValue();
+  S.gems -= n; S.coins += n * val;
+  msg(`Converted ${fmt(n)} gems into ${fmt(n*val)} coins.`);
+  render(); save();
+}
+function buyBuilding(id){
+  const b = BUILDINGS.find(x=>x.id===id);
+  const c = buildingCost(b), g = buildingGems(b);
+  if (S.coins < c || S.gems < g) return;
+  S.coins -= c; S.gems -= g;
+  S.counts[id] = count(id) + 1;
+  render(); save();
+}
+function buyUpgrade(id){
+  const u = UPGRADES.find(x=>x.id===id);
+  if (S.ups[id] || S.coins < u.coins || S.gems < u.gems) return;
+  S.coins -= u.coins; S.gems -= u.gems; S.ups[id] = true;
+  render(); save();
+}
+function retire(){
+  if (S.gems < 5) return;
+  const gain = 0.05 + 0.001 * totalBuildings();
+  if (!confirm(`Retire for 5 gems? You'll gain +${(gain*100).toFixed(1)}% permanent income.`)) return;
+  S.gems -= 5; S.bonus += gain; S.coins = 0; S.counts = {};
+  msg(`Retired! Permanent bonus is now +${(S.bonus*100).toFixed(1)}%.`);
+  render(); save();
+}
+function wipe(){
+  if (!confirm('Delete ALL progress?')) return;
+  S = fresh(); save(); render(); msg('');
+}
+
+// ---------- rendering ----------
+function render(){
+  const $ = id => document.getElementById(id);
+  $('coins').textContent = fmt(S.coins);
+  $('gems').textContent = fmt(S.gems);
+  $('pop').textContent = fmt(population());
+  $('rate').textContent = fmt(rateHr());
+  $('bonus').textContent = '+' + (S.bonus*100).toFixed(1) + '%';
+  $('ratio').textContent = `1 HP = ${hpRatio()} gem${hpRatio()>1?'s':''}`;
+  $('gemval').textContent = `1 gem = ${fmt(gemValue())} coins`;
+  $('retinfo').textContent = `Would give +${((0.05+0.001*totalBuildings())*100).toFixed(1)}% (${totalBuildings()} buildings)`;
+  $('retbtn').disabled = S.gems < 5;
+
+  $('buildings').innerHTML = BUILDINGS.map(b=>{
+    const c = buildingCost(b), g = buildingGems(b);
+    const ok = S.coins >= c && S.gems >= g;
+    return `<div class="row">
+      <div><b>${b.name}</b> (lvl ${count(b.id)})<br>
+      <small>+${b.pop} pop · ${fmt(c)} coins${g?' + 1 gem':''}</small></div>
+      <button ${ok?'':'disabled'} onclick="buyBuilding('${b.id}')">Buy</button>
+    </div>`;
+  }).join('');
+
+  $('upgrades').innerHTML = UPGRADES.map(u=>{
+    const owned = S.ups[u.id];
+    const ok = !owned && S.coins >= u.coins && S.gems >= u.gems;
+    return `<div class="row">
+      <div><b>${u.name}</b><br><small>${u.desc}<br>${fmt(u.coins)} coins · ${u.gems} gems</small></div>
+      <button ${ok?'':'disabled'} onclick="buyUpgrade('${u.id}')">${owned?'Owned':'Buy'}</button>
+    </div>`;
+  }).join('');
+}
+
+// ---------- start ----------
+(function init(){
+  const r = tick();
+  if (r.away && r.earned > 0){
+    msg(`Welcome back! You earned ${fmt(r.earned)} coins while away${(Date.now()-0) && r.capped>=OFFLINE_CAP?' (12h cap reached)':''}.`);
+  }
+  render(); save();
+  setInterval(()=>{ tick(); render(); }, 1000);
+  setInterval(save, 5000);
+  window.addEventListener('beforeunload', save);
+})();
+</script>
+</body>
+    </html>
